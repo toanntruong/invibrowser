@@ -21,6 +21,8 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -118,6 +120,16 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare Specific Artifacts for Upload
+        run: |
+          CURRENT_VERSION="${{ steps.version.outputs.version }}"
+          echo "Preparing files for version: ${CURRENT_VERSION}"
+          
+          mkdir -p "staging/${CURRENT_VERSION}"
+          
+          cp "dist/InviBrowser Setup ${CURRENT_VERSION}.exe" "staging/${CURRENT_VERSION}/"
+          cp "dist/latest.yml" "staging/${CURRENT_VERSION}/"
+
       - name: Deploy Artifacts to Cloudflare R2
         uses: jakejarvis/s3-sync-action@master
         with:
@@ -128,7 +140,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_REGION: 'auto'
           AWS_S3_ENDPOINT: ${{ secrets.R2_ENDPOINT_URL }}
-          SOURCE_DIR: 'dist'
+          SOURCE_DIR: 'staging'
 
       - name: Create GitHub Release (Backup Mirror)
         uses: softprops/action-gh-release@v1
@@ -137,6 +149,6 @@ jobs:
           files: |
             dist/*.exe
             dist/latest.yml
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           prerelease: false
