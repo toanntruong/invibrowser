@@ -1,0 +1,145 @@
+name: CICD
+
+on:
+  # push:
+  #   tags:
+  #     - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., v1.0.20)'
+        required: false
+        type: string
+
+concurrency:
+  group: release-build
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.TARGET_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: 'develop'
+          fetch-depth: 1
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          VERSION_NUMBER="${VERSION#v}"
+          
+          echo "Target Release Version: ${VERSION}"
+          echo "Version number for package: ${VERSION_NUMBER}"
+          echo "version=${VERSION_NUMBER}" >> $GITHUB_OUTPUT
+
+      - name: Update package.json version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Updating package.json to version ${VERSION}..."
+
+          # Update version in package.json using Node.js
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '${VERSION}';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+          echo "package.json updated to version ${VERSION}"
+
+          # Verify the change
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "Current package.json version: ${CURRENT_VERSION}"
+
+      - name: Sync package-lock.json files
+        run: |
+          echo "Syncing package-lock.json with package.json..."
+          set +x
+          npm install
+          set -x
+
+          echo "Syncing update-server/package-lock.json..."
+          set +x
+          cd update-server
+          npm install
+          cd ..
+          set -x
+
+          echo "All lockfiles synced successfully"
+
+      - name: Retrieve env
+        run: |
+          set +x
+          echo "${{ secrets.ENV }}" > .env.production
+          set -x
+
+      - name: Build Docker image
+        run: |
+          echo "Building Docker image for Windows cross-compilation..."
+          set +x
+          docker build -f Dockerfile.builder -t gravity-browser-builder:latest .
+          set -x
+
+      - name: Run build in Docker container
+        run: |
+          echo "Running build inside Docker container..."
+          sudo docker run --rm \
+            -e UPDATE_SERVER_TOKEN="TODO" \
+            -e GH_TOKEN="TODO" \
+            -v "$(pwd)/dist:/app/dist" \
+            -v "$(pwd)/package.json:/app/package.json" \
+            -v "$(pwd)/package-lock.json:/app/package-lock.json" \
+            gravity-browser-builder:latest
+
+      - name: Verify build artifacts
+        run: |
+          echo "Verifying build artifacts..."
+          if [ ! -f dist/*.exe ]; then
+            echo "ERROR: .exe file not found"
+            exit 1
+          fi
+          if [ ! -f dist/*.blockmap ]; then
+            echo "ERROR: .blockmap file not found"
+            exit 1
+          fi
+          if [ ! -f dist/latest.yml ]; then
+            echo "ERROR: latest.yml not found"
+            exit 1
+          fi
+
+      - name: Deploy Artifacts to Cloudflare R2
+        uses: jakejarvis/s3-sync-action@master
+        with:
+          args: --follow-symlinks
+        env:
+          AWS_S3_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: 'auto'
+          AWS_S3_ENDPOINT: ${{ secrets.R2_ENDPOINT_URL }}
+          SOURCE_DIR: 'dist'
+
+      - name: Create GitHub Release (Backup Mirror)
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: |
+            dist/*.exe
+            dist/latest.yml
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+      - name: Cleanup Workspaces
+        if: always()
+        run: |
+          echo "Purging build cache and sensitive files..."
+          rm -f .env .env.production
+          rm -rf dist/
+          docker image prune -f
