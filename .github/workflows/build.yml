@@ -11,6 +11,9 @@ on:
         required: false
         type: string
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
 concurrency:
   group: release-build
   cancel-in-progress: false
@@ -23,8 +26,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          repository: ${{ secrets.TARGET_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          repository: ${{ secrets.REPO_NAME }}
+          token: ${{ secrets.REPO_TOKEN }}
           ref: 'develop'
           fetch-depth: 1
 
@@ -76,7 +79,7 @@ jobs:
       - name: Retrieve env
         run: |
           set +x
-          echo "${{ secrets.ENV }}" > .env.production
+          echo "${{ secrets.ENV }}" | base64 --decode > .env.production
           set -x
 
       - name: Build Docker image
@@ -89,13 +92,15 @@ jobs:
       - name: Run build in Docker container
         run: |
           echo "Running build inside Docker container..."
-          sudo docker run --rm \
+          set +x
+          docker run --rm \
             -e UPDATE_SERVER_TOKEN="TODO" \
             -e GH_TOKEN="TODO" \
             -v "$(pwd)/dist:/app/dist" \
             -v "$(pwd)/package.json:/app/package.json" \
             -v "$(pwd)/package-lock.json:/app/package-lock.json" \
             gravity-browser-builder:latest
+          set -x
 
       - name: Verify build artifacts
         run: |
@@ -135,11 +140,3 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
-
-      - name: Cleanup Workspaces
-        if: always()
-        run: |
-          echo "Purging build cache and sensitive files..."
-          rm -f .env .env.production
-          rm -rf dist/
-          docker image prune -f
